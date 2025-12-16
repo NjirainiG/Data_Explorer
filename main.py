@@ -7,7 +7,7 @@ from branca.element import Template, MacroElement
 
 # Set page config for better performance
 st.set_page_config(
-    page_title="Kenya Ward Stunting Data Explorer",
+    page_title="Kenya Ward Data Explorer",
     page_icon="📍",
     layout="wide"
 )
@@ -311,3 +311,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
