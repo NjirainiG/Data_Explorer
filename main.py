@@ -7,7 +7,7 @@ from branca.element import Template, MacroElement
 
 # Set page config for better performance
 st.set_page_config(
-    page_title="Kenya Ward Data Explorer",
+    page_title="Kenya Ward Stunting Data Explorer",
     page_icon="📍",
     layout="wide"
 )
@@ -65,7 +65,8 @@ def create_choropleth_map(gdf, indicator, centroid_y, centroid_x):
         key_on='feature.properties.ward',
         fill_color='YlOrRd',
         fill_opacity=0.7,
-        line_opacity=0.1,
+        line_opacity=0.05,
+        line_weight=0.3,
         legend_name=f'{indicator}',
         highlight=True,
         bins=7,
@@ -76,6 +77,7 @@ def create_choropleth_map(gdf, indicator, centroid_y, centroid_x):
     folium.features.GeoJson(
         gdf,
         name='Labels',
+        style_function=lambda x: {'weight': 0.3, 'color': '#666666'},
         tooltip=folium.features.GeoJsonTooltip(
             fields=['ward', indicator, 'county', 'subcounty'],
             aliases=['Ward:', f'{indicator}:', 'County:', 'Subcounty:'],
@@ -311,4 +313,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
