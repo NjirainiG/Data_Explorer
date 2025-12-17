@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import geopandas as gpd
 import folium
+import branca
 from streamlit_folium import st_folium
 from branca.element import Template, MacroElement
 
@@ -313,4 +314,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
