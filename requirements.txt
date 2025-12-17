@@ -5,5 +5,5 @@ pandas
 folium
 streamlit-folium
 requests
+google-generativeai
 branca
-
