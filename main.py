@@ -109,9 +109,9 @@ def load_geojson_from_drive():
         # Google Drive file ID for the ward stunting data (from secrets)
         file_id = st.secrets.get("GOOGLE_DRIVE_GEOJSON_FILE_ID")
         if not file_id:
-            st.error("Google Drive file ID not configured in secrets.")
-            return None
-            
+            st.error("Google Drive file ID not configured in secrets. Please set GOOGLE_DRIVE_GEOJSON_FILE_ID in your Streamlit secrets.")
+            return gpd.GeoDataFrame()  # Return empty GeoDataFrame instead of None
+        
         download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
         
         response = requests.get(download_url, timeout=30)
@@ -127,7 +127,7 @@ def load_geojson_from_drive():
         return gdf
     except Exception as e:
         st.error(f"Failed to load data: {str(e)}")
-        return None
+        return gpd.GeoDataFrame()  # Return empty GeoDataFrame instead of None
 
 def create_choropleth_map(gdf, indicator, centroid_y, centroid_x):
     """Create an optimized Folium choropleth map."""
