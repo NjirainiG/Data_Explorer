@@ -2,8 +2,11 @@ import streamlit as st
 import requests
 import geopandas as gpd
 import folium
+import pandas as pd
+import google.generativeai as genai
 from streamlit_folium import st_folium
 from branca.element import Template, MacroElement
+import json
 
 # Set page config for better performance
 st.set_page_config(
@@ -11,6 +14,92 @@ st.set_page_config(
     page_icon="📍",
     layout="wide"
 )
+
+# Initialize Gemini API
+@st.cache_resource
+def init_gemini():
+    """Initialize Gemini API with caching."""
+    try:
+        api_key = st.secrets.get("GEMINI_API_KEY")
+        if not api_key:
+            st.warning("GEMINI_API_KEY not found in secrets. AI features will be disabled.")
+            return None
+        
+        genai.configure(api_key=api_key)
+        
+        # Try the most likely models for the current API version
+        # Based on available models list, try these in order
+        known_models = [
+            'gemini-2.0-flash-exp',  # Experimental model that might work
+            'gemini-2.0-flash',      # Standard flash model
+            'gemini-2.0-flash-001',  # Specific version
+            'gemini-2.0-flash-lite', # Lite version
+            'gemini-2.5-flash',      # Newer flash model
+            'gemini-2.5-flash-lite', # Newer lite version
+            'gemini-pro-latest',     # Pro model (latest)
+            'gemini-exp-1206',       # Experimental model from Dec 2024
+        ]
+        
+        model = None
+        error_messages = []
+        
+        for model_name in known_models:
+            try:
+                model = genai.GenerativeModel(model_name)
+                # Test the model with a simple prompt
+                test_response = model.generate_content("Hello")
+                if test_response and test_response.text:
+                    st.sidebar.success(f"✓ Using model: {model_name}")
+                    return model
+            except Exception as e:
+                error_messages.append(f"{model_name}: {str(e)}")
+                continue
+        
+        # If no known model works, try listing and using available models
+        try:
+            models = genai.list_models()
+            # Sort models to prioritize text generation models
+            gemini_models = []
+            for m in models:
+                model_name = m.name
+                if 'gemini' in model_name.lower() and 'embedding' not in model_name.lower():
+                    gemini_models.append(model_name)
+            
+            # Try each Gemini model
+            for model_name in gemini_models:
+                try:
+                    # Remove 'models/' prefix if present
+                    if model_name.startswith('models/'):
+                        short_name = model_name[7:]
+                    else:
+                        short_name = model_name
+                    
+                    model = genai.GenerativeModel(short_name)
+                    test_response = model.generate_content("Hello")
+                    if test_response and test_response.text:
+                        st.sidebar.success(f"✓ Using model: {short_name}")
+                        return model
+                except Exception as e:
+                    error_messages.append(f"{model_name}: {str(e)}")
+                    continue
+        except Exception as e:
+            error_messages.append(f"Error listing models: {str(e)}")
+        
+        # If no model works, provide helpful guidance
+        if error_messages:
+            st.error(f"Failed to initialize Gemini models. The API key appears valid but no compatible model was found.")
+            st.info("""
+            **Troubleshooting steps:**
+            1. Check your Gemini API key in `.streamlit/secrets.toml`
+            2. Ensure the API key has access to the Gemini API
+            3. Try using a different model name from the available list
+            4. Check Google AI Studio for available models in your region
+            """)
+        return None
+        
+    except Exception as e:
+        st.error(f"Failed to initialize Gemini API: {str(e)}")
+        return None
 
 # Cache the data loading function to avoid reloading on every interaction
 @st.cache_data(ttl=3600, show_spinner="Loading ward data from Google Drive...")
@@ -125,8 +214,148 @@ def create_choropleth_map(gdf, indicator, centroid_y, centroid_x):
     
     return m
 
+def get_data_summary(gdf):
+    """Generate a comprehensive data summary for the AI agent."""
+    numeric_cols = gdf.select_dtypes(include=['number']).columns.tolist()
+    if 'Ward_Codes' in numeric_cols:
+        numeric_cols.remove('Ward_Codes')
+    
+    # Identify stunting-related columns (case-insensitive)
+    stunting_keywords = ['stunting', 'stunt', 'malnutrition', 'nutrition']
+    stunting_cols = []
+    for col in numeric_cols:
+        if any(keyword in col.lower() for keyword in stunting_keywords):
+            stunting_cols.append(col)
+    
+    summary = {
+        "dataset_overview": {
+            "data_granularity": "WARD-LEVEL (most granular administrative unit in Kenya)",
+            "total_wards": len(gdf),
+            "total_counties": gdf['county'].nunique(),
+            "total_subcounties": gdf['subcounty'].nunique(),
+            "columns": gdf.columns.tolist(),
+            "numeric_columns": numeric_cols,
+            "stunting_related_columns": stunting_cols,
+            "has_ward_level_stunting_data": len(stunting_cols) > 0
+        },
+        "summary_statistics": {},
+        "top_performers": {},
+        "bottom_performers": {},
+        "regional_insights": {
+            "county_level": {},
+            "ward_level_examples": {}
+        }
+    }
+    
+    # Calculate summary statistics for numeric columns
+    for col in numeric_cols:
+        summary["summary_statistics"][col] = {
+            "mean": float(gdf[col].mean()),
+            "median": float(gdf[col].median()),
+            "min": float(gdf[col].min()),
+            "max": float(gdf[col].max()),
+            "std": float(gdf[col].std()),
+            "ward_level_available": True
+        }
+        
+        # Top 5 performers (wards)
+        top_5 = gdf.nlargest(5, col)[['ward', 'county', col]]
+        summary["top_performers"][col] = top_5.to_dict('records')
+        
+        # Bottom 5 performers (wards)
+        bottom_5 = gdf.nsmallest(5, col)[['ward', 'county', col]]
+        summary["bottom_performers"][col] = bottom_5.to_dict('records')
+    
+    # County-level aggregation
+    county_stats = gdf.groupby('county')[numeric_cols].mean().reset_index()
+    summary["regional_insights"]["county_level"] = county_stats.to_dict('records')
+    
+    # Ward-level examples for Nairobi (if available)
+    nairobi_wards = gdf[gdf['county'].str.contains('Nairobi', case=False, na=False)]
+    if not nairobi_wards.empty:
+        for col in stunting_cols[:2]:  # First two stunting columns
+            nairobi_top = nairobi_wards.nlargest(3, col)[['ward', col]]
+            summary["regional_insights"]["ward_level_examples"][f"nairobi_{col}"] = nairobi_top.to_dict('records')
+    
+    return summary
+
+def query_ai_agent(question, data_summary, model, chat_history=None):
+    """Query the AI agent with the user's question and data context."""
+    # System prompt for the data scientist with economics background
+    system_prompt = """
+    You are a senior data scientist with an economics background specializing in public policy decision-making for Kenya's development goals (Kenya Vision 2063). You analyze ward-level data to provide actionable insights for policymakers.
+
+    **CRITICAL DATA CONTEXT - READ CAREFULLY:**
+    - The dataset contains **WARD-LEVEL stunting data** - this is the most granular administrative unit in Kenya
+    - Stunting data is available at the ward level for ALL counties including Nairobi
+    - The data includes {total_wards} wards across {total_counties} counties
+    - Ward-level stunting data enables intra-county analysis to identify hotspots within counties
+    - The dataset has ward-level stunting data: {has_stunting_data}
+    - Stunting-related columns in dataset: {stunting_columns}
+
+    **Your Expertise:**
+    - Economic development and poverty reduction strategies
+    - Public health and nutrition policy (stunting, malnutrition)
+    - Regional development and resource allocation
+    - Evidence-based policy recommendations
+    - Spatial analysis and geographic disparities
+    - Intra-county analysis using ward-level data
+
+    **Available Data Context:**
+    {data_context}
+
+    **Guidelines for Responses:**
+    1. ALWAYS acknowledge that ward-level stunting data is available when discussing data granularity
+    2. Use specific ward-level examples from the data (top/bottom performers by ward)
+    3. Conduct intra-county analysis to identify wards with highest stunting rates within counties
+    4. Consider economic implications and policy trade-offs
+    5. Highlight geographic disparities and regional patterns at both county AND ward levels
+    6. Suggest targeted interventions for high-priority wards (not just counties)
+    7. Connect findings to Kenya Vision 2063 goals
+    8. Be concise but comprehensive in your analysis
+    9. Use specific numbers from the data when available
+    10. NEVER suggest that ward-level stunting data is missing - it is available in this dataset
+
+    **Current Question:**
+    {question}
+    """
+    
+    # Extract key information from data summary for the prompt
+    total_wards = data_summary.get("dataset_overview", {}).get("total_wards", "unknown")
+    total_counties = data_summary.get("dataset_overview", {}).get("total_counties", "unknown")
+    has_stunting_data = data_summary.get("dataset_overview", {}).get("has_ward_level_stunting_data", False)
+    stunting_columns = data_summary.get("dataset_overview", {}).get("stunting_related_columns", [])
+    
+    # Prepare data context
+    data_context = json.dumps(data_summary, indent=2)
+    
+    # Prepare full prompt with injected context
+    full_prompt = system_prompt.format(
+        total_wards=total_wards,
+        total_counties=total_counties,
+        has_stunting_data=has_stunting_data,
+        stunting_columns=", ".join(stunting_columns) if stunting_columns else "None identified",
+        data_context=data_context[:14000],  # Slightly reduced to accommodate new context
+        question=question
+    )
+    
+    try:
+        # Include chat history if available
+        if chat_history and len(chat_history) > 0:
+            # Prepare conversation context
+            conversation_context = "\nPrevious conversation:\n"
+            for msg in chat_history[-5:]:  # Last 5 messages
+                conversation_context += f"{msg['role']}: {msg['content']}\n"
+            full_prompt = conversation_context + "\n" + full_prompt
+        
+        # Generate response
+        response = model.generate_content(full_prompt)
+        return response.text
+    except Exception as e:
+        return f"Error querying AI agent: {str(e)}"
+
 def main():
-    st.title("📊 Kenya Ward-Level Stunting Data Explorer")
+    st.title("📊 Kenya Ward-Level Stunting Data Explorer with AI Policy Advisor")
     
     # Load data with caching (spinner is handled by the cache decorator)
     gdf = load_geojson_from_drive()
@@ -134,6 +363,9 @@ def main():
     if gdf is None or gdf.empty:
         st.error("No data available. Please check your internet connection.")
         return
+    
+    # Initialize Gemini AI
+    ai_model = init_gemini()
     
     # Display basic dataset info
     st.sidebar.header("Dataset Information")
@@ -150,8 +382,8 @@ def main():
         st.dataframe(gdf.head())
         return
     
-    # Main interface tabs
-    tab1, tab2, tab3 = st.tabs(["🗺️ Map Visualization", "📈 Data Analysis", "📥 Export Data"])
+    # Main interface tabs - Adding AI Agent tab
+    tab1, tab2, tab3, tab4 = st.tabs(["🗺️ Map Visualization", "📈 Data Analysis", "📥 Export Data", "🤖 AI Policy Advisor"])
     
     with tab1:
         col1, col2 = st.columns([3, 1])
@@ -318,6 +550,61 @@ def main():
                 else:
                     st.info("Click 'Generate GeoJSON' to create download file")
     
+    with tab4:
+        st.subheader("🤖 AI Policy Advisor")
+        st.markdown("""
+        **Ask questions about the data to get insights from our AI Data Scientist with economics background.**
+        
+        *Example questions:*
+        - Which counties have the highest stunting rates?
+        - What is the relationship between population and stunting rates?
+        - Recommend policy interventions for high-stunting areas
+        - Analyze regional disparities in stunting rates
+        - How does this data relate to Kenya Vision 2063 goals?
+        """)
+        
+        # Initialize session state for chat
+        if 'chat_history' not in st.session_state:
+            st.session_state.chat_history = []
+        
+        if 'data_summary' not in st.session_state:
+            st.session_state.data_summary = get_data_summary(gdf)
+        
+        # Display chat history
+        chat_container = st.container()
+        with chat_container:
+            for message in st.session_state.chat_history:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+        
+        # Chat input
+        if ai_model:
+            if prompt := st.chat_input("Ask a question about the data..."):
+                # Add user message to chat
+                st.session_state.chat_history.append({"role": "user", "content": prompt})
+                
+                # Display user message
+                with st.chat_message("user"):
+                    st.markdown(prompt)
+                
+                # Generate AI response
+                with st.chat_message("assistant"):
+                    with st.spinner("Analyzing data and formulating policy insights..."):
+                        response = query_ai_agent(
+                            prompt, 
+                            st.session_state.data_summary, 
+                            ai_model,
+                            st.session_state.chat_history
+                        )
+                        st.markdown(response)
+                
+                # Add AI response to chat history
+                st.session_state.chat_history.append({"role": "assistant", "content": response})
+        else:
+            st.warning("⚠️ AI features are currently disabled. Please ensure GEMINI_API_KEY is set in secrets.toml")
+            st.info("To enable AI features, add your Gemini API key to `.streamlit/secrets.toml`:")
+            st.code("GEMINI_API_KEY = 'your-api-key-here'")
+    
     # Footer with dataset info
     st.sidebar.divider()
     st.sidebar.write("### About the Dataset")
@@ -331,6 +618,8 @@ def main():
     - County and subcounty information
     
     **Data Source:** Google Drive
+    
+    **AI Features:** Powered by Google Gemini
     """)
 
 if __name__ == "__main__":
