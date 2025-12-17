@@ -2,19 +2,18 @@ import streamlit as st
 import requests
 import geopandas as gpd
 import folium
-import branca
 from streamlit_folium import st_folium
 from branca.element import Template, MacroElement
 
 # Set page config for better performance
 st.set_page_config(
-    page_title="Kenya 2063 County Ward Level Data Explorer",
+    page_title="Kenya 2063 Ward Level Data Explorer",
     page_icon="📍",
     layout="wide"
 )
 
 # Cache the data loading function to avoid reloading on every interaction
-@st.cache_data(ttl=3600, show_spinner=True)
+@st.cache_data(ttl=3600, show_spinner="Loading ward data from Google Drive...")
 def load_geojson_from_drive():
     """Load GeoJSON data from Google Drive with caching."""
     try:
@@ -22,7 +21,7 @@ def load_geojson_from_drive():
         file_id = st.secrets.get("GOOGLE_DRIVE_GEOJSON_FILE_ID")
         if not file_id:
             st.error("Google Drive file ID not configured in secrets.")
-            return None, None
+            return None
             
         download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
         
@@ -36,13 +35,10 @@ def load_geojson_from_drive():
         if gdf.crs is None:
             gdf = gdf.set_crs(epsg=4326)
         
-        # Project for calculations (Web Mercator)
-        gdf_projected = gdf.to_crs(epsg=3857)
-        
-        return gdf, gdf_projected
+        return gdf
     except Exception as e:
         st.error(f"Failed to load data: {str(e)}")
-        return None, None
+        return None
 
 def create_choropleth_map(gdf, indicator, centroid_y, centroid_x):
     """Create an optimized Folium choropleth map."""
@@ -57,8 +53,8 @@ def create_choropleth_map(gdf, indicator, centroid_y, centroid_x):
     min_val = gdf[indicator].min()
     max_val = gdf[indicator].max()
     
-    # Create choropleth
-    folium.Choropleth(
+    # Create choropleth with simplified options
+    choropleth = folium.Choropleth(
         geo_data=gdf,
         name='choropleth',
         data=gdf,
@@ -69,21 +65,31 @@ def create_choropleth_map(gdf, indicator, centroid_y, centroid_x):
         line_opacity=0.05,
         line_weight=0.3,
         legend_name=f'{indicator}',
-        highlight=True,
-        bins=7,
+        highlight=False,  # Disable highlight for better performance
+        bins=5,  # Reduced bins for faster rendering
         reset=True
-    ).add_to(m)
-
-    # Add tooltips
-    folium.features.GeoJson(
+    )
+    
+    # Add choropleth to map
+    choropleth.add_to(m)
+    
+    # Get the style function for GeoJson (defined as a regular function for pickling)
+    def style_function(feature):
+        return {
+            'weight': 0.3,
+            'color': '#666666'
+        }
+    
+    # Add tooltips with simplified style
+    folium.GeoJson(
         gdf,
         name='Labels',
-        style_function=lambda x: {'weight': 0.3, 'color': '#666666'},
-        tooltip=folium.features.GeoJsonTooltip(
-            fields=['ward', indicator, 'county', 'subcounty'],
-            aliases=['Ward:', f'{indicator}:', 'County:', 'Subcounty:'],
+        style_function=style_function,
+        tooltip=folium.GeoJsonTooltip(
+            fields=['ward', indicator, 'county'],
+            aliases=['Ward:', f'{indicator}:', 'County:'],
             localize=True,
-            style="font-size: 12px;"
+            style="font-size: 11px;"
         )
     ).add_to(m)
     
@@ -122,8 +128,8 @@ def create_choropleth_map(gdf, indicator, centroid_y, centroid_x):
 def main():
     st.title("📊 Kenya Ward-Level Stunting Data Explorer")
     
-    # Load data with caching
-    gdf, gdf_projected = load_geojson_from_drive()
+    # Load data with caching (spinner is handled by the cache decorator)
+    gdf = load_geojson_from_drive()
     
     if gdf is None or gdf.empty:
         st.error("No data available. Please check your internet connection.")
@@ -153,9 +159,10 @@ def main():
         with col1:
             st.subheader("Interactive Map")
             
-            # Calculate centroids for map center
-            centroid_y = gdf.geometry.centroid.y.mean()
-            centroid_x = gdf.geometry.centroid.x.mean()
+            # Pre-calculate map center from bounds (faster than centroid)
+            bounds = gdf.total_bounds
+            centroid_y = (bounds[1] + bounds[3]) / 2
+            centroid_x = (bounds[0] + bounds[2]) / 2
             
             # Indicator selection
             selected_indicator = st.selectbox(
@@ -198,24 +205,34 @@ def main():
         
         with col1:
             st.write("**Summary Statistics**")
-            summary_stats = gdf[numeric_cols].describe().T
+            # Cache summary statistics
+            @st.cache_data(ttl=300)
+            def get_summary_stats(_gdf, numeric_cols):
+                return _gdf[numeric_cols].describe().T
+            
+            summary_stats = get_summary_stats(gdf, numeric_cols)
             st.dataframe(summary_stats.style.format("{:.2f}"))
         
         with col2:
             st.write("**County-Level Aggregation**")
             
-            # Aggregate by county
-            county_stats = gdf.groupby('county')[numeric_cols].mean()
+            # Cache county aggregation
+            @st.cache_data(ttl=300)
+            def get_county_stats(_gdf, numeric_cols):
+                return _gdf.groupby('county')[numeric_cols].mean()
+            
+            county_stats = get_county_stats(gdf, numeric_cols)
             st.dataframe(
                 county_stats.style.format("{:.1f}"),
                 use_container_width=True
             )
         
-        # Correlation matrix (simplified)
+        # Correlation matrix (simplified) - only compute if requested
         if len(numeric_cols) > 1:
-            st.write("**Correlation Matrix**")
-            correlation = gdf[numeric_cols].corr()
-            st.dataframe(correlation.style.background_gradient(cmap='RdBu', vmin=-1, vmax=1))
+            if st.checkbox("Show correlation matrix", value=False):
+                st.write("**Correlation Matrix**")
+                correlation = gdf[numeric_cols].corr()
+                st.dataframe(correlation.style.background_gradient(cmap='RdBu', vmin=-1, vmax=1))
     
     with tab3:
         st.subheader("Export Data")
@@ -288,14 +305,18 @@ def main():
                 )
             
             with col2:
-                # Create simplified GeoJSON for download
-                geojson_data = filtered_gdf[export_columns + ['geometry']].to_json()
-                st.download_button(
-                    label="🗺️ Download as GeoJSON",
-                    data=geojson_data,
-                    file_name="kenya_ward_stunting_data.geojson",
-                    mime="application/json"
-                )
+                # Create simplified GeoJSON for download - only when clicked
+                if st.button("Generate GeoJSON for download"):
+                    with st.spinner("Generating GeoJSON..."):
+                        geojson_data = filtered_gdf[export_columns + ['geometry']].to_json()
+                        st.download_button(
+                            label="🗺️ Download as GeoJSON",
+                            data=geojson_data,
+                            file_name="kenya_ward_stunting_data.geojson",
+                            mime="application/json"
+                        )
+                else:
+                    st.info("Click 'Generate GeoJSON' to create download file")
     
     # Footer with dataset info
     st.sidebar.divider()
@@ -314,5 +335,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
