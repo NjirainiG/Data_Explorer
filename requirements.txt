@@ -5,3 +5,5 @@ pandas
 folium
 streamlit-folium
 requests
+branca
+
