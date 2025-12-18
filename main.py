@@ -3,7 +3,7 @@ import requests
 import geopandas as gpd
 import folium
 import pandas as pd
-import google.generativeai as genai
+import google.genai as genai
 from streamlit_folium import st_folium
 from branca.element import Template, MacroElement
 import json
@@ -674,6 +674,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
