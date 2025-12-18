@@ -3,7 +3,7 @@ import requests
 import geopandas as gpd
 import folium
 import pandas as pd
-import google.genai as genai  # Updated import
+import google.genai as genai
 from streamlit_folium import st_folium
 from branca.element import Template, MacroElement
 import json
@@ -67,32 +67,25 @@ def init_gemini():
                 # Try the next model if this one fails
                 continue
         
-        # If no known model works, list available models and try the first Gemini model
-        try:
-            # List models is not directly available in the new API, so we'll handle errors
-            st.warning("No known model worked. Trying to find available models...")
-            
-            # Try a few more model variations
-            fallback_models = [
-                'models/gemini-1.5-flash',
-                'models/gemini-1.5-pro',
-                'models/gemini-pro'
-            ]
-            
-            for model_name in fallback_models:
-                try:
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents="Hello"
-                    )
-                    if response and hasattr(response, 'text'):
-                        st.sidebar.success(f"✓ Using fallback model: {model_name}")
-                        return client, model_name
-                except:
-                    continue
+        # If no known model works, try fallback models
+        st.warning("No known model worked. Trying fallback models...")
+        fallback_models = [
+            'models/gemini-1.5-flash',
+            'models/gemini-1.5-pro',
+            'models/gemini-pro'
+        ]
         
-        except Exception as e:
-            st.error(f"Error finding model: {str(e)}")
+        for model_name in fallback_models:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents="Hello"
+                )
+                if response and hasattr(response, 'text'):
+                    st.sidebar.success(f"✓ Using fallback model: {model_name}")
+                    return client, model_name
+            except:
+                continue
         
         st.error("No compatible Gemini model found. Please check your API key and permissions.")
         return None, None
@@ -246,36 +239,70 @@ def create_choropleth_map(gdf, indicator, centroid_y, centroid_x):
     return m
 
 def get_data_summary(gdf):
-    """Generate a comprehensive data summary for the AI agent."""
+    """Generate a comprehensive data summary for the AI agent with actual ward-level data."""
     numeric_cols = gdf.select_dtypes(include=['number']).columns.tolist()
     if 'Ward_Codes' in numeric_cols:
         numeric_cols.remove('Ward_Codes')
     
-    # Identify stunting-related columns
-    stunting_keywords = ['stunting', 'stunt', 'malnutrition', 'nutrition']
+    # Identify stunting-related columns (case-insensitive)
+    stunting_keywords = ['stunting', 'stunt', 'malnutrition', 'nutrition', 'health', 'wasting', 'underweight']
     stunting_cols = []
     for col in numeric_cols:
-        if any(keyword in col.lower() for keyword in stunting_keywords):
+        col_lower = col.lower()
+        if any(keyword in col_lower for keyword in stunting_keywords):
             stunting_cols.append(col)
+    
+    # Get county-specific data with actual ward-level stunting rates
+    county_ward_data = {}
+    for county in gdf['county'].unique():
+        county_df = gdf[gdf['county'] == county]
+        if stunting_cols:
+            county_ward_data[county] = {}
+            for col in stunting_cols[:3]:  # Top 3 stunting columns
+                if col in county_df.columns:
+                    # Get ward with highest stunting in this county
+                    max_ward = county_df.loc[county_df[col].idxmax()] if not county_df.empty else None
+                    min_ward = county_df.loc[county_df[col].idxmin()] if not county_df.empty else None
+                    
+                    county_ward_data[county][col] = {
+                        'highest_ward': {
+                            'ward': max_ward['ward'] if max_ward is not None else 'N/A',
+                            'value': float(max_ward[col]) if max_ward is not None else 0.0,
+                            'subcounty': max_ward['subcounty'] if max_ward is not None else 'N/A'
+                        } if max_ward is not None else None,
+                        'lowest_ward': {
+                            'ward': min_ward['ward'] if min_ward is not None else 'N/A',
+                            'value': float(min_ward[col]) if min_ward is not None else 0.0,
+                            'subcounty': min_ward['subcounty'] if min_ward is not None else 'N/A'
+                        } if min_ward is not None else None,
+                        'county_average': float(county_df[col].mean()) if not county_df.empty else 0.0,
+                        'ward_count': len(county_df)
+                    }
+    
+    # Get Nakuru specific data (as an example for testing)
+    nakuru_data = {}
+    if 'Nakuru' in county_ward_data:
+        nakuru_data = county_ward_data['Nakuru']
     
     summary = {
         "dataset_overview": {
-            "data_granularity": "WARD-LEVEL",
+            "data_granularity": "WARD-LEVEL (most granular administrative unit in Kenya)",
             "total_wards": len(gdf),
             "total_counties": gdf['county'].nunique(),
             "total_subcounties": gdf['subcounty'].nunique(),
             "columns": gdf.columns.tolist(),
             "numeric_columns": numeric_cols,
             "stunting_related_columns": stunting_cols,
-            "has_ward_level_stunting_data": len(stunting_cols) > 0
+            "has_ward_level_stunting_data": len(stunting_cols) > 0,
+            "stunting_columns_found": stunting_cols
         },
         "summary_statistics": {},
-        "top_performers": {},
-        "bottom_performers": {},
-        "regional_insights": {
-            "county_level": {},
-            "ward_level_examples": {}
-        }
+        "ward_level_examples": {
+            "nakuru_example": nakuru_data,
+            "sample_ward_data": {}
+        },
+        "county_ward_analysis": county_ward_data,
+        "top_bottom_wards": {}
     }
     
     # Calculate summary statistics for numeric columns
@@ -289,40 +316,121 @@ def get_data_summary(gdf):
             "ward_level_available": True
         }
         
-        # Top 5 performers
-        top_5 = gdf.nlargest(5, col)[['ward', 'county', col]]
-        summary["top_performers"][col] = top_5.to_dict('records')
-        
-        # Bottom 5 performers
-        bottom_5 = gdf.nsmallest(5, col)[['ward', 'county', col]]
-        summary["bottom_performers"][col] = bottom_5.to_dict('records')
+        # Top 5 wards (highest values)
+        top_5 = gdf.nlargest(5, col)[['ward', 'county', 'subcounty', col]]
+        summary["top_bottom_wards"][col] = {
+            "top_5_wards": top_5.to_dict('records'),
+            "bottom_5_wards": gdf.nsmallest(5, col)[['ward', 'county', 'subcounty', col]].to_dict('records')
+        }
     
-    # County-level aggregation
-    county_stats = gdf.groupby('county')[numeric_cols].mean().reset_index()
-    summary["regional_insights"]["county_level"] = county_stats.to_dict('records')
+    # Add sample ward data for a few counties
+    sample_counties = ['Nairobi', 'Mombasa', 'Kisumu', 'Nakuru', 'Kakamega']
+    for county in sample_counties:
+        if county in gdf['county'].values:
+            county_wards = gdf[gdf['county'] == county]
+            if not county_wards.empty and stunting_cols:
+                for col in stunting_cols[:2]:  # First 2 stunting columns
+                    if col in county_wards.columns:
+                        sample_wards = county_wards[['ward', col, 'subcounty']].head(3).to_dict('records')
+                        summary["ward_level_examples"]["sample_ward_data"][f"{county}_{col}"] = sample_wards
     
-    # Ward-level examples for Nairobi
-    nairobi_wards = gdf[gdf['county'].str.contains('Nairobi', case=False, na=False)]
-    if not nairobi_wards.empty and stunting_cols:
-        for col in stunting_cols[:2]:
-            nairobi_top = nairobi_wards.nlargest(3, col)[['ward', col]]
-            summary["regional_insights"]["ward_level_examples"][f"nairobi_{col}"] = nairobi_top.to_dict('records')
+    # Add Nakuru specific ward data for testing
+    if 'Nakuru' in gdf['county'].values:
+        nakuru_wards = gdf[gdf['county'] == 'Nakuru']
+        if not nakuru_wards.empty and stunting_cols:
+            for col in stunting_cols[:3]:
+                if col in nakuru_wards.columns:
+                    # Get all wards in Nakuru with their stunting values
+                    nakuru_all_wards = nakuru_wards[['ward', col, 'subcounty']].sort_values(col, ascending=False)
+                    summary["ward_level_examples"]["nakuru_all_wards"] = nakuru_all_wards.to_dict('records')
+                    break  # Just get the first stunting column
     
     return summary
 
-def query_ai_agent(question, data_summary, client, model_name, chat_history=None):
-    """Query the AI agent with the user's question and data context."""
-    # System prompt for the data scientist
+def extract_specific_data_for_query(gdf, question):
+    """Extract specific ward-level data based on the user's question."""
+    extracted_data = {}
+    
+    # Check if question is about a specific county
+    county_names = gdf['county'].unique().tolist()
+    mentioned_counties = []
+    
+    for county in county_names:
+        if county.lower() in question.lower():
+            mentioned_counties.append(county)
+    
+    # If specific counties are mentioned, extract their ward-level data
+    for county in mentioned_counties[:2]:  # Limit to first 2 mentioned counties
+        county_df = gdf[gdf['county'] == county]
+        
+        # Get stunting columns
+        numeric_cols = county_df.select_dtypes(include=['number']).columns.tolist()
+        stunting_keywords = ['stunting', 'stunt', 'malnutrition', 'nutrition', 'health']
+        stunting_cols = []
+        for col in numeric_cols:
+            if any(keyword in col.lower() for keyword in stunting_keywords):
+                stunting_cols.append(col)
+        
+        if stunting_cols:
+            for col in stunting_cols[:3]:  # Top 3 stunting columns
+                # Get top and bottom wards for this stunting indicator
+                top_wards = county_df.nlargest(5, col)[['ward', col, 'subcounty']]
+                bottom_wards = county_df.nsmallest(5, col)[['ward', col, 'subcounty']]
+                
+                extracted_data[f"{county}_{col}"] = {
+                    "county": county,
+                    "indicator": col,
+                    "top_wards": top_wards.to_dict('records'),
+                    "bottom_wards": bottom_wards.to_dict('records'),
+                    "county_average": float(county_df[col].mean()),
+                    "ward_count": len(county_df)
+                }
+    
+    # If no specific counties mentioned but question is about stunting, provide overall data
+    if not extracted_data and any(word in question.lower() for word in ['stunting', 'stunt', 'malnutrition']):
+        numeric_cols = gdf.select_dtypes(include=['number']).columns.tolist()
+        stunting_cols = []
+        for col in numeric_cols:
+            if any(keyword in col.lower() for keyword in ['stunting', 'stunt', 'malnutrition']):
+                stunting_cols.append(col)
+        
+        if stunting_cols:
+            for col in stunting_cols[:2]:
+                # National level top and bottom wards
+                top_wards = gdf.nlargest(10, col)[['ward', 'county', 'subcounty', col]]
+                bottom_wards = gdf.nsmallest(10, col)[['ward', 'county', 'subcounty', col]]
+                
+                extracted_data[f"national_{col}"] = {
+                    "indicator": col,
+                    "top_wards_national": top_wards.to_dict('records'),
+                    "bottom_wards_national": bottom_wards.to_dict('records'),
+                    "national_average": float(gdf[col].mean())
+                }
+    
+    return extracted_data
+
+def query_ai_agent(question, data_summary, client, model_name, gdf, chat_history=None):
+    """Query the AI agent with the user's question and data context, including specific ward-level data."""
+    # Extract specific ward-level data based on the question
+    specific_data = extract_specific_data_for_query(gdf, question)
+    
+    # System prompt for the data scientist with economics background
     system_prompt = """
     You are a senior data scientist with an economics background specializing in public policy decision-making for Kenya's development goals (Kenya Vision 2063). You analyze ward-level data to provide actionable insights for policymakers.
 
     **CRITICAL DATA CONTEXT - READ CAREFULLY:**
-    - The dataset contains **WARD-LEVEL stunting data** - this is the most granular administrative unit in Kenya
-    - Stunting data is available at the ward level for ALL counties including Nairobi
+    - The dataset contains **WARD-LEVEL STUNTING DATA** - this is the most granular administrative unit in Kenya
+    - Stunting data is available at the ward level for ALL counties including Nairobi and Nakuru
     - The data includes {total_wards} wards across {total_counties} counties
-    - Ward-level stunting data enables intra-county analysis to identify hotspots within counties
+    - You have access to ACTUAL WARD-LEVEL stunting rates - use them in your analysis
     - The dataset has ward-level stunting data: {has_stunting_data}
-    - Stunting-related columns in dataset: {stunting_columns}
+    - Stunting-related columns found in dataset: {stunting_columns}
+
+    **AVAILABLE WARD-LEVEL DATA:**
+    {specific_data}
+
+    **DATASET SUMMARY:**
+    {data_summary}
 
     **Your Expertise:**
     - Economic development and poverty reduction strategies
@@ -332,43 +440,51 @@ def query_ai_agent(question, data_summary, client, model_name, chat_history=None
     - Spatial analysis and geographic disparities
     - Intra-county analysis using ward-level data
 
-    **Available Data Context:**
-    {data_context}
-
-    **Guidelines for Responses:**
-    1. ALWAYS acknowledge that ward-level stunting data is available when discussing data granularity
-    2. Use specific ward-level examples from the data (top/bottom performers by ward)
-    3. Conduct intra-county analysis to identify wards with highest stunting rates within counties
-    4. Consider economic implications and policy trade-offs
-    5. Highlight geographic disparities and regional patterns at both county AND ward levels
-    6. Suggest targeted interventions for high-priority wards (not just counties)
-    7. Connect findings to Kenya Vision 2063 goals
-    8. Be concise but comprehensive in your analysis
-    9. Use specific numbers from the data when available
-    10. NEVER suggest that ward-level stunting data is missing - it is available in this dataset
+    **CRITICAL INSTRUCTIONS:**
+    1. You MUST use the ACTUAL ward-level stunting data provided in the "AVAILABLE WARD-LEVEL DATA" section
+    2. When asked about a specific county (like Nakuru), use the ward-level data for that county
+    3. Provide specific ward names, their stunting rates, and subcounty information
+    4. If ward-level data is provided for the question, you MUST reference it
+    5. Do NOT say ward-level data is not available - it IS available in this dataset
+    6. Use exact numbers from the data when available
+    7. Conduct intra-county analysis to identify wards with highest stunting rates within counties
+    8. Suggest targeted interventions for high-priority wards
 
     **Current Question:**
     {question}
+
+    **IMPORTANT:** Your response MUST include:
+    1. Specific ward names and their exact stunting rates from the data
+    2. County and subcounty information for mentioned wards
+    3. Comparative analysis within counties when relevant
+    4. Policy recommendations based on the ward-level data
+    5. Connection to Kenya Vision 2063 goals
     """
     
-    # Extract key information from data summary
+    # Extract key information from data summary for the prompt
     total_wards = data_summary.get("dataset_overview", {}).get("total_wards", "unknown")
     total_counties = data_summary.get("dataset_overview", {}).get("total_counties", "unknown")
     has_stunting_data = data_summary.get("dataset_overview", {}).get("has_ward_level_stunting_data", False)
     stunting_columns = data_summary.get("dataset_overview", {}).get("stunting_related_columns", [])
     
-    # Prepare data context (truncate if too long)
-    data_context = json.dumps(data_summary, indent=2)
-    if len(data_context) > 14000:
-        data_context = data_context[:14000] + "\n... (truncated)"
+    # Prepare specific data context
+    specific_data_context = json.dumps(specific_data, indent=2) if specific_data else "No specific data extracted for this query."
     
-    # Prepare full prompt
+    # Prepare data summary context (truncated)
+    data_summary_context = json.dumps({
+        "dataset_overview": data_summary.get("dataset_overview", {}),
+        "summary_statistics": {k: v for k, v in list(data_summary.get("summary_statistics", {}).items())[:5]},
+        "ward_level_examples": data_summary.get("ward_level_examples", {})
+    }, indent=2)
+    
+    # Prepare full prompt with injected context
     full_prompt = system_prompt.format(
         total_wards=total_wards,
         total_counties=total_counties,
         has_stunting_data=has_stunting_data,
         stunting_columns=", ".join(stunting_columns) if stunting_columns else "None identified",
-        data_context=data_context,
+        specific_data=specific_data_context,
+        data_summary=data_summary_context,
         question=question
     )
     
@@ -383,11 +499,11 @@ def query_ai_agent(question, data_summary, client, model_name, chat_history=None
         # Generate response using new API
         response = client.models.generate_content(
             model=model_name,
-            contents=full_prompt  # Note: contents should be the prompt string
+            contents=full_prompt
         )
         return response.text if hasattr(response, 'text') else str(response)
     except Exception as e:
-        return f"Error querying AI agent: {str(e)}"
+        return f"Error querying AI agent: {str(e)}\n\nDebug info: Question was about ward-level stunting data which IS available in the dataset."
 
 def main():
     st.title("📊 Kenya Ward-Level Stunting Data Explorer with AI Policy Advisor")
@@ -404,6 +520,24 @@ def main():
         st.error("No data available. Please check your data source and connection.")
         return
     
+    # Display data info for debugging
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Data Information**")
+    st.sidebar.write(f"Columns: {len(gdf.columns)}")
+    st.sidebar.write(f"Sample columns: {list(gdf.columns[:5])}...")
+    
+    # Check for stunting columns
+    numeric_cols = gdf.select_dtypes(include=['number']).columns.tolist()
+    stunting_keywords = ['stunting', 'stunt', 'malnutrition', 'nutrition']
+    stunting_cols = []
+    for col in numeric_cols:
+        if any(keyword in col.lower() for keyword in stunting_keywords):
+            stunting_cols.append(col)
+    
+    if stunting_cols:
+        st.sidebar.success(f"✓ Found {len(stunting_cols)} stunting columns")
+        st.sidebar.write("Stunting columns:", stunting_cols[:3])
+    
     # Initialize Gemini AI
     ai_client, model_name = init_gemini()
     
@@ -413,7 +547,6 @@ def main():
     st.sidebar.metric("Total Counties", gdf['county'].nunique())
     
     # Get numeric columns for selection
-    numeric_cols = gdf.select_dtypes(include=['number']).columns.tolist()
     if 'Ward_Codes' in numeric_cols:
         numeric_cols.remove('Ward_Codes')
     
@@ -436,10 +569,16 @@ def main():
             centroid_y = (bounds[1] + bounds[3]) / 2
             centroid_x = (bounds[0] + bounds[2]) / 2
             
-            # Indicator selection
+            # Indicator selection - prioritize stunting columns
+            available_indicators = []
+            if stunting_cols:
+                available_indicators = stunting_cols + [col for col in numeric_cols if col not in stunting_cols]
+            else:
+                available_indicators = numeric_cols
+            
             selected_indicator = st.selectbox(
                 "Select indicator to visualize:",
-                numeric_cols,
+                available_indicators,
                 key='map_indicator'
             )
             
@@ -451,7 +590,6 @@ def main():
                 st_folium(m, width=700, height=500, key=f"map_{selected_indicator}")
             except Exception as e:
                 st.error(f"Map rendering error: {str(e)}")
-                # Fallback: show static map image or data table
         
         with col2:
             st.subheader("Map Controls")
@@ -472,9 +610,9 @@ def main():
             
             # Top wards
             st.write("**Top 5 Wards:**")
-            top_wards = gdf.nlargest(5, selected_indicator)[['ward', selected_indicator]]
+            top_wards = gdf.nlargest(5, selected_indicator)[['ward', selected_indicator, 'county']]
             for _, row in top_wards.iterrows():
-                st.write(f"- {row['ward']}: {row[selected_indicator]:.1f}")
+                st.write(f"- {row['ward']} ({row['county']}): {row[selected_indicator]:.1f}")
     
     with tab2:
         st.subheader("Data Analysis")
@@ -513,6 +651,14 @@ def main():
                 
                 correlation = get_correlation(gdf, numeric_cols)
                 st.dataframe(correlation.style.background_gradient(cmap='RdBu', vmin=-1, vmax=1))
+        
+        # Show sample ward-level stunting data
+        if stunting_cols:
+            st.write("### Ward-Level Stunting Data Sample")
+            sample_col = stunting_cols[0]
+            st.write(f"**Sample of ward-level {sample_col} data:**")
+            sample_data = gdf[['ward', 'county', 'subcounty', sample_col]].sort_values(sample_col, ascending=False).head(10)
+            st.dataframe(sample_data.style.format({sample_col: "{:.2f}"}))
     
     with tab3:
         st.subheader("Export Data")
@@ -601,14 +747,16 @@ def main():
     with tab4:
         st.subheader("🤖 AI Policy Advisor")
         st.markdown("""
-        **Ask questions about the data to get insights from our AI Data Scientist with economics background.**
+        **Ask questions about the ward-level stunting data to get insights from our AI Data Scientist.**
         
-        *Example questions:*
-        - Which counties have the highest stunting rates?
-        - What is the relationship between population and stunting rates?
-        - Recommend policy interventions for high-stunting areas
-        - Analyze regional disparities in stunting rates
-        - How does this data relate to Kenya Vision 2063 goals?
+        ***Example questions about ward-level data:***
+        - Which ward in Nakuru has the highest stunting rate?
+        - What are the top 5 wards with highest stunting rates nationally?
+        - Compare stunting rates between wards in Nairobi County
+        - Which subcounty in Mombasa has the worst stunting problem?
+        - What is the stunting rate in [specific ward name]?
+        - Analyze ward-level disparities in stunting within Kakamega County
+        - Recommend targeted interventions for high-stunting wards in Kisumu
         """)
         
         # Initialize session state for chat
@@ -627,7 +775,7 @@ def main():
         
         # Chat input
         if ai_client and model_name:
-            if prompt := st.chat_input("Ask a question about the data..."):
+            if prompt := st.chat_input("Ask about ward-level stunting data..."):
                 # Add user message to chat
                 st.session_state.chat_history.append({"role": "user", "content": prompt})
                 
@@ -637,12 +785,13 @@ def main():
                 
                 # Generate AI response
                 with st.chat_message("assistant"):
-                    with st.spinner("Analyzing data and formulating policy insights..."):
+                    with st.spinner("Analyzing ward-level data..."):
                         response = query_ai_agent(
                             prompt, 
                             st.session_state.data_summary, 
                             ai_client,
                             model_name,
+                            gdf,  # Pass the actual GeoDataFrame
                             st.session_state.chat_history
                         )
                         st.markdown(response)
@@ -662,13 +811,14 @@ def main():
     st.sidebar.divider()
     st.sidebar.write("### About the Dataset")
     st.sidebar.write("""
-    This dataset contains ward-level stunting rates 
+    This dataset contains **ward-level stunting rates** 
     and related indicators across Kenya.
     
-    **Indicators include:**
-    - Stunting rates
-    - Population data
+    **Key Features:**
+    - Ward-level stunting data (most granular level)
     - County and subcounty information
+    - Geographic boundaries for mapping
+    - Multiple stunting/nutrition indicators
     
     **Data Source:** Google Drive
     
