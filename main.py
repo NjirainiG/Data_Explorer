@@ -3,7 +3,7 @@ import requests
 import geopandas as gpd
 import folium
 import pandas as pd
-import google.genai as genai  # Updated import
+import google.generativeai as genai
 from streamlit_folium import st_folium
 from branca.element import Template, MacroElement
 import json
@@ -672,3 +672,4 @@ if __name__ == "__main__":
     except Exception as e:
         st.error(f"Application error: {str(e)}")
         st.info("Please check the logs for details.")
+
