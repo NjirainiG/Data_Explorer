@@ -3,28 +3,17 @@ import requests
 import geopandas as gpd
 import folium
 import pandas as pd
-import google.genai as genai
+import google.genai as genai  # Updated import
 from streamlit_folium import st_folium
 from branca.element import Template, MacroElement
 import json
-import os
-import sys
-import requests
-import streamlit as st
-import pydeck as pdk
-from shapely.geometry import Point
-import tempfile
-import time
-from datetime import datetime
+import matplotlib.cm as cm
+import matplotlib.colors as colors
 
-# Add at the beginning of main():
-def health_check():
-    return "OK"
+# Constants for optimization
+MAX_CHAT_HISTORY = 20
+SIMPLIFICATION_TOLERANCE = 0.001
 
-if __name__ == "__main__":
-    # Add for Streamlit Cloud health checks
-    st.write("")  # Empty write to ensure page loads
-    main()
 # Set page config for better performance
 st.set_page_config(
     page_title="Kenya 2063 Ward Level Data Explorer",
@@ -32,179 +21,185 @@ st.set_page_config(
     layout="wide"
 )
 
+def get_color(value, min_val, max_val):
+    """Get color for choropleth using matplotlib."""
+    norm = colors.Normalize(vmin=min_val, vmax=max_val)
+    cmap = cm.YlOrRd
+    rgba = cmap(norm(value))
+    return colors.to_hex(rgba)
+
 # Initialize Gemini API
 @st.cache_resource
 def init_gemini():
-    """Initialize Gemini API with caching."""
+    """Initialize Gemini API with caching and error handling."""
     try:
         api_key = st.secrets.get("GEMINI_API_KEY")
         if not api_key:
             st.warning("GEMINI_API_KEY not found in secrets. AI features will be disabled.")
             return None
         
-        genai.configure(api_key=api_key)
+        # Configure with new API
+        client = genai.Client(api_key=api_key)
         
-        # Try the most likely models for the current API version
-        # Based on available models list, try these in order
-        known_models = [
-            'gemini-2.0-flash-exp',  # Experimental model that might work
-            'gemini-2.0-flash',      # Standard flash model
-            'gemini-2.0-flash-001',  # Specific version
-            'gemini-2.0-flash-lite', # Lite version
-            'gemini-2.5-flash',      # Newer flash model
-            'gemini-2.5-flash-lite', # Newer lite version
-            'gemini-pro-latest',     # Pro model (latest)
-            'gemini-exp-1206',       # Experimental model from Dec 2024
-        ]
-        
-        model = None
-        error_messages = []
-        
-        for model_name in known_models:
-            try:
-                model = genai.GenerativeModel(model_name)
-                # Test the model with a simple prompt
-                test_response = model.generate_content("Hello")
-                if test_response and test_response.text:
-                    st.sidebar.success(f"✓ Using model: {model_name}")
-                    return model
-            except Exception as e:
-                error_messages.append(f"{model_name}: {str(e)}")
-                continue
-        
-        # If no known model works, try listing and using available models
+        # List available models and find a suitable one
         try:
-            models = genai.list_models()
-            # Sort models to prioritize text generation models
-            gemini_models = []
-            for m in models:
-                model_name = m.name
-                if 'gemini' in model_name.lower() and 'embedding' not in model_name.lower():
-                    gemini_models.append(model_name)
+            # Get list of available models
+            models = client.list_models()
             
-            # Try each Gemini model
-            for model_name in gemini_models:
-                try:
-                    # Remove 'models/' prefix if present
-                    if model_name.startswith('models/'):
-                        short_name = model_name[7:]
-                    else:
-                        short_name = model_name
-                    
-                    model = genai.GenerativeModel(short_name)
-                    test_response = model.generate_content("Hello")
-                    if test_response and test_response.text:
-                        st.sidebar.success(f"✓ Using model: {short_name}")
-                        return model
-                except Exception as e:
-                    error_messages.append(f"{model_name}: {str(e)}")
-                    continue
-        except Exception as e:
-            error_messages.append(f"Error listing models: {str(e)}")
+            # Try these models in order of preference
+            preferred_models = [
+                'gemini-2.0-flash-exp',
+                'gemini-2.0-flash',
+                'gemini-2.0-flash-001',
+                'gemini-2.5-flash',
+                'gemini-1.5-flash',
+                'gemini-1.5-pro'
+            ]
+            
+            # Filter to available models
+            available_model_names = [model.name for model in models]
+            
+            # Try each preferred model that's available
+            for model_name in preferred_models:
+                if any(model_name in name for name in available_model_names):
+                    try:
+                        # Test with a simple prompt
+                        response = client.models.generate_content(
+                            model=model_name,
+                            contents=["Hello"]
+                        )
+                        if response and response.text:
+                            st.sidebar.success(f"✓ Using model: {model_name}")
+                            return client, model_name
+                    except Exception as e:
+                        continue
+            
+            # If no preferred model works, try the first available Gemini model
+            gemini_models = [name for name in available_model_names if 'gemini' in name.lower()]
+            if gemini_models:
+                model_name = gemini_models[0].split('/')[-1]  # Remove 'models/' prefix
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=["Hello"]
+                )
+                if response and response.text:
+                    st.sidebar.success(f"✓ Using available model: {model_name}")
+                    return client, model_name
         
-        # If no model works, provide helpful guidance
-        if error_messages:
-            st.error(f"Failed to initialize Gemini models. The API key appears valid but no compatible model was found.")
-            st.info("""
-            **Troubleshooting steps:**
-            1. Check your Gemini API key in `.streamlit/secrets.toml`
-            2. Ensure the API key has access to the Gemini API
-            3. Try using a different model name from the available list
-            4. Check Google AI Studio for available models in your region
-            """)
-        return None
+        except Exception as e:
+            st.error(f"Error finding model: {str(e)}")
+        
+        st.error("No compatible Gemini model found. Please check your API key and permissions.")
+        return None, None
         
     except Exception as e:
         st.error(f"Failed to initialize Gemini API: {str(e)}")
-        return None
+        return None, None
 
 # Cache the data loading function to avoid reloading on every interaction
-# Replace load_geojson_from_drive() with optimized version:
 @st.cache_data(ttl=3600, show_spinner="Loading ward data...")
 def load_geojson_from_drive():
-    """Load GeoJSON with memory optimization for cloud deployment."""
+    """Load GeoJSON data with robust error handling and optimization."""
     try:
+        # Google Drive file ID for the ward stunting data (from secrets)
         file_id = st.secrets.get("GOOGLE_DRIVE_GEOJSON_FILE_ID")
         if not file_id:
-            st.error("Google Drive file ID not configured.")
+            st.error("Google Drive file ID not configured in secrets.")
             return gpd.GeoDataFrame()
         
-        # Use st.cache_data to memoize the request
-        @st.cache_data(ttl=3600)
-        def fetch_geojson_content():
-            url = f"https://drive.google.com/uc?export=download&id={file_id}"
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-            return response.content
+        # Create download URL
+        download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
         
-        content = fetch_geojson_content()
+        # Configure session for better performance
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            max_retries=3,
+            pool_connections=10,
+            pool_maxsize=10
+        )
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
         
-        # Read with optimized parameters
+        # Request with timeout
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        response = session.get(download_url, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        # Check if response is valid
+        if not response.text.strip():
+            st.error("Received empty response from Google Drive")
+            return gpd.GeoDataFrame()
+        
+        # Load GeoDataFrame with optimization
         gdf = gpd.read_file(
-            content,
-            driver='GeoJSON',
-            engine='pyogrio',  # Faster engine if available
+            response.text,
+            engine='pyogrio'  # Faster engine if available
         )
         
-        # Downcast numeric columns to save memory
-        for col in gdf.select_dtypes(include=['number']).columns:
-            gdf[col] = pd.to_numeric(gdf[col], downcast='float')
+        # Validate the GeoDataFrame
+        if gdf.empty:
+            st.warning("Loaded GeoDataFrame is empty")
+            return gdf
         
+        # Ensure valid geometry and CRS
+        if gdf.crs is None:
+            gdf = gdf.set_crs(epsg=4326)
+        
+        # Simplify geometries for better performance
+        gdf['geometry'] = gdf.geometry.simplify(SIMPLIFICATION_TOLERANCE)
+        
+        # Optimize memory usage by downcasting numeric columns
+        for col in gdf.select_dtypes(include=['number']).columns:
+            if gdf[col].dtype in ['float64', 'int64']:
+                gdf[col] = pd.to_numeric(gdf[col], downcast='float')
+        
+        st.sidebar.success(f"✓ Loaded {len(gdf)} wards")
         return gdf
+        
+    except requests.exceptions.RequestException as e:
+        st.error(f"Network error: {str(e)}")
+        st.info("Check file permissions and ensure it's publicly accessible.")
+        return gpd.GeoDataFrame()
         
     except Exception as e:
         st.error(f"Error loading data: {str(e)}")
         return gpd.GeoDataFrame()
-        
+
 def create_choropleth_map(gdf, indicator, centroid_y, centroid_x):
     """Create an optimized Folium choropleth map."""
     m = folium.Map(
         location=[centroid_y, centroid_x],
-        zoom_start=6,  # Zoom out for Kenya overview
-        tiles='OpenStreetMap',
-        control_scale=True
+        zoom_start=6,
+        tiles='cartodbpositron',  # Lighter tiles
+        control_scale=True,
+        prefer_canvas=True  # Better performance for many polygons
     )
     
     # Calculate min and max values
     min_val = gdf[indicator].min()
     max_val = gdf[indicator].max()
     
-    # Create choropleth with simplified options
-    choropleth = folium.Choropleth(
-        geo_data=gdf,
-        name='choropleth',
-        data=gdf,
-        columns=['ward', indicator],
-        key_on='feature.properties.ward',
-        fill_color='YlOrRd',
-        fill_opacity=0.7,
-        line_opacity=0.05,
-        line_weight=0.3,
-        legend_name=f'{indicator}',
-        highlight=False,  # Disable highlight for better performance
-        bins=5,  # Reduced bins for faster rendering
-        reset=True
-    )
-    
-    # Add choropleth to map
-    choropleth.add_to(m)
-    
-    # Get the style function for GeoJson (defined as a regular function for pickling)
+    # Create style function
     def style_function(feature):
+        value = feature['properties'][indicator]
         return {
+            'fillColor': get_color(value, min_val, max_val),
+            'color': '#666666',
             'weight': 0.3,
-            'color': '#666666'
+            'fillOpacity': 0.7
         }
     
-    # Add tooltips with simplified style
+    # Add GeoJson with styling and tooltips
     folium.GeoJson(
         gdf,
-        name='Labels',
+        name='choropleth',
         style_function=style_function,
         tooltip=folium.GeoJsonTooltip(
             fields=['ward', indicator, 'county'],
             aliases=['Ward:', f'{indicator}:', 'County:'],
-            localize=True,
             style="font-size: 11px;"
         )
     ).add_to(m)
@@ -247,7 +242,7 @@ def get_data_summary(gdf):
     if 'Ward_Codes' in numeric_cols:
         numeric_cols.remove('Ward_Codes')
     
-    # Identify stunting-related columns (case-insensitive)
+    # Identify stunting-related columns
     stunting_keywords = ['stunting', 'stunt', 'malnutrition', 'nutrition']
     stunting_cols = []
     for col in numeric_cols:
@@ -256,7 +251,7 @@ def get_data_summary(gdf):
     
     summary = {
         "dataset_overview": {
-            "data_granularity": "WARD-LEVEL (most granular administrative unit in Kenya)",
+            "data_granularity": "WARD-LEVEL",
             "total_wards": len(gdf),
             "total_counties": gdf['county'].nunique(),
             "total_subcounties": gdf['subcounty'].nunique(),
@@ -285,11 +280,11 @@ def get_data_summary(gdf):
             "ward_level_available": True
         }
         
-        # Top 5 performers (wards)
+        # Top 5 performers
         top_5 = gdf.nlargest(5, col)[['ward', 'county', col]]
         summary["top_performers"][col] = top_5.to_dict('records')
         
-        # Bottom 5 performers (wards)
+        # Bottom 5 performers
         bottom_5 = gdf.nsmallest(5, col)[['ward', 'county', col]]
         summary["bottom_performers"][col] = bottom_5.to_dict('records')
     
@@ -297,18 +292,18 @@ def get_data_summary(gdf):
     county_stats = gdf.groupby('county')[numeric_cols].mean().reset_index()
     summary["regional_insights"]["county_level"] = county_stats.to_dict('records')
     
-    # Ward-level examples for Nairobi (if available)
+    # Ward-level examples for Nairobi
     nairobi_wards = gdf[gdf['county'].str.contains('Nairobi', case=False, na=False)]
-    if not nairobi_wards.empty:
-        for col in stunting_cols[:2]:  # First two stunting columns
+    if not nairobi_wards.empty and stunting_cols:
+        for col in stunting_cols[:2]:
             nairobi_top = nairobi_wards.nlargest(3, col)[['ward', col]]
             summary["regional_insights"]["ward_level_examples"][f"nairobi_{col}"] = nairobi_top.to_dict('records')
     
     return summary
 
-def query_ai_agent(question, data_summary, model, chat_history=None):
+def query_ai_agent(question, data_summary, client, model_name, chat_history=None):
     """Query the AI agent with the user's question and data context."""
-    # System prompt for the data scientist with economics background
+    # System prompt for the data scientist
     system_prompt = """
     You are a senior data scientist with an economics background specializing in public policy decision-making for Kenya's development goals (Kenya Vision 2063). You analyze ward-level data to provide actionable insights for policymakers.
 
@@ -347,52 +342,61 @@ def query_ai_agent(question, data_summary, model, chat_history=None):
     {question}
     """
     
-    # Extract key information from data summary for the prompt
+    # Extract key information from data summary
     total_wards = data_summary.get("dataset_overview", {}).get("total_wards", "unknown")
     total_counties = data_summary.get("dataset_overview", {}).get("total_counties", "unknown")
     has_stunting_data = data_summary.get("dataset_overview", {}).get("has_ward_level_stunting_data", False)
     stunting_columns = data_summary.get("dataset_overview", {}).get("stunting_related_columns", [])
     
-    # Prepare data context
+    # Prepare data context (truncate if too long)
     data_context = json.dumps(data_summary, indent=2)
+    if len(data_context) > 14000:
+        data_context = data_context[:14000] + "\n... (truncated)"
     
-    # Prepare full prompt with injected context
+    # Prepare full prompt
     full_prompt = system_prompt.format(
         total_wards=total_wards,
         total_counties=total_counties,
         has_stunting_data=has_stunting_data,
         stunting_columns=", ".join(stunting_columns) if stunting_columns else "None identified",
-        data_context=data_context[:14000],  # Slightly reduced to accommodate new context
+        data_context=data_context,
         question=question
     )
     
     try:
         # Include chat history if available
         if chat_history and len(chat_history) > 0:
-            # Prepare conversation context
             conversation_context = "\nPrevious conversation:\n"
-            for msg in chat_history[-5:]:  # Last 5 messages
+            for msg in chat_history[-5:]:
                 conversation_context += f"{msg['role']}: {msg['content']}\n"
             full_prompt = conversation_context + "\n" + full_prompt
         
-        # Generate response
-        response = model.generate_content(full_prompt)
-        return response.text
+        # Generate response using new API
+        response = client.models.generate_content(
+            model=model_name,
+            contents=[full_prompt]
+        )
+        return response.text if hasattr(response, 'text') else str(response)
     except Exception as e:
         return f"Error querying AI agent: {str(e)}"
 
 def main():
     st.title("📊 Kenya Ward-Level Stunting Data Explorer with AI Policy Advisor")
     
-    # Load data with caching (spinner is handled by the cache decorator)
-    gdf = load_geojson_from_drive()
+    # Add simple health check indicator
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**App Status:** ✅ Running")
+    
+    # Load data with caching
+    with st.spinner("Loading ward-level data..."):
+        gdf = load_geojson_from_drive()
     
     if gdf is None or gdf.empty:
-        st.error("No data available. Please check your internet connection.")
+        st.error("No data available. Please check your data source and connection.")
         return
     
     # Initialize Gemini AI
-    ai_model = init_gemini()
+    ai_client, model_name = init_gemini()
     
     # Display basic dataset info
     st.sidebar.header("Dataset Information")
@@ -405,11 +409,11 @@ def main():
         numeric_cols.remove('Ward_Codes')
     
     if not numeric_cols:
-        st.warning("No numeric indicators found in the dataset.")
+        st.warning("No numeric indicators found.")
         st.dataframe(gdf.head())
         return
     
-    # Main interface tabs - Adding AI Agent tab
+    # Main interface tabs
     tab1, tab2, tab3, tab4 = st.tabs(["🗺️ Map Visualization", "📈 Data Analysis", "📥 Export Data", "🤖 AI Policy Advisor"])
     
     with tab1:
@@ -418,7 +422,7 @@ def main():
         with col1:
             st.subheader("Interactive Map")
             
-            # Pre-calculate map center from bounds (faster than centroid)
+            # Calculate map center
             bounds = gdf.total_bounds
             centroid_y = (bounds[1] + bounds[3]) / 2
             centroid_x = (bounds[0] + bounds[2]) / 2
@@ -432,12 +436,18 @@ def main():
             
             # Create and display map
             m = create_choropleth_map(gdf, selected_indicator, centroid_y, centroid_x)
-            st_folium(m, width=700, height=500)
+            
+            # Display map with error handling
+            try:
+                st_folium(m, width=700, height=500, key=f"map_{selected_indicator}")
+            except Exception as e:
+                st.error(f"Map rendering error: {str(e)}")
+                # Fallback: show static map image or data table
         
         with col2:
             st.subheader("Map Controls")
             
-            # Quick statistics for selected indicator
+            # Quick statistics
             st.metric(
                 f"Average {selected_indicator}",
                 f"{gdf[selected_indicator].mean():.1f}"
@@ -451,7 +461,7 @@ def main():
                 f"{gdf[selected_indicator].min():.1f}"
             )
             
-            # Top wards for selected indicator
+            # Top wards
             st.write("**Top 5 Wards:**")
             top_wards = gdf.nlargest(5, selected_indicator)[['ward', selected_indicator]]
             for _, row in top_wards.iterrows():
@@ -464,10 +474,9 @@ def main():
         
         with col1:
             st.write("**Summary Statistics**")
-            # Cache summary statistics
             @st.cache_data(ttl=300)
-            def get_summary_stats(_gdf, numeric_cols):
-                return _gdf[numeric_cols].describe().T
+            def get_summary_stats(_gdf, _numeric_cols):
+                return _gdf[_numeric_cols].describe().T
             
             summary_stats = get_summary_stats(gdf, numeric_cols)
             st.dataframe(summary_stats.style.format("{:.2f}"))
@@ -475,10 +484,9 @@ def main():
         with col2:
             st.write("**County-Level Aggregation**")
             
-            # Cache county aggregation
             @st.cache_data(ttl=300)
-            def get_county_stats(_gdf, numeric_cols):
-                return _gdf.groupby('county')[numeric_cols].mean()
+            def get_county_stats(_gdf, _numeric_cols):
+                return _gdf.groupby('county')[_numeric_cols].mean()
             
             county_stats = get_county_stats(gdf, numeric_cols)
             st.dataframe(
@@ -486,11 +494,15 @@ def main():
                 use_container_width=True
             )
         
-        # Correlation matrix (simplified) - only compute if requested
+        # Correlation matrix
         if len(numeric_cols) > 1:
             if st.checkbox("Show correlation matrix", value=False):
                 st.write("**Correlation Matrix**")
-                correlation = gdf[numeric_cols].corr()
+                @st.cache_data(ttl=300)
+                def get_correlation(_gdf, _numeric_cols):
+                    return _gdf[_numeric_cols].corr()
+                
+                correlation = get_correlation(gdf, numeric_cols)
                 st.dataframe(correlation.style.background_gradient(cmap='RdBu', vmin=-1, vmax=1))
     
     with tab3:
@@ -512,7 +524,7 @@ def main():
         col1, col2 = st.columns(2)
         
         filter_expressions = []
-        for i, col in enumerate(numeric_cols[:2]):  # Limit to 2 columns for UI simplicity
+        for i, col in enumerate(numeric_cols[:2]):
             col_container = col1 if i % 2 == 0 else col2
             with col_container:
                 min_val = float(gdf[col].min())
@@ -564,7 +576,7 @@ def main():
                 )
             
             with col2:
-                # Create simplified GeoJSON for download - only when clicked
+                # Generate GeoJSON on demand
                 if st.button("Generate GeoJSON for download"):
                     with st.spinner("Generating GeoJSON..."):
                         geojson_data = filtered_gdf[export_columns + ['geometry']].to_json()
@@ -605,7 +617,7 @@ def main():
                     st.markdown(message["content"])
         
         # Chat input
-        if ai_model:
+        if ai_client and model_name:
             if prompt := st.chat_input("Ask a question about the data..."):
                 # Add user message to chat
                 st.session_state.chat_history.append({"role": "user", "content": prompt})
@@ -620,15 +632,20 @@ def main():
                         response = query_ai_agent(
                             prompt, 
                             st.session_state.data_summary, 
-                            ai_model,
+                            ai_client,
+                            model_name,
                             st.session_state.chat_history
                         )
                         st.markdown(response)
                 
                 # Add AI response to chat history
                 st.session_state.chat_history.append({"role": "assistant", "content": response})
+                
+                # Trim chat history if too long
+                if len(st.session_state.chat_history) > MAX_CHAT_HISTORY:
+                    st.session_state.chat_history = st.session_state.chat_history[-MAX_CHAT_HISTORY:]
         else:
-            st.warning("⚠️ AI features are currently disabled. Please ensure GEMINI_API_KEY is set in secrets.toml")
+            st.warning("⚠️ AI features are currently disabled.")
             st.info("To enable AI features, add your Gemini API key to `.streamlit/secrets.toml`:")
             st.code("GEMINI_API_KEY = 'your-api-key-here'")
     
@@ -641,7 +658,7 @@ def main():
     
     **Indicators include:**
     - Stunting rates
-    - Population data (2009)
+    - Population data
     - County and subcounty information
     
     **Data Source:** Google Drive
@@ -650,11 +667,8 @@ def main():
     """)
 
 if __name__ == "__main__":
-    main()
-
-
-
-
-
-
-
+    try:
+        main()
+    except Exception as e:
+        st.error(f"Application error: {str(e)}")
+        st.info("Please check the logs for details.")
