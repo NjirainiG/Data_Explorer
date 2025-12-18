@@ -111,32 +111,73 @@ def init_gemini():
         return None
 
 # Cache the data loading function to avoid reloading on every interaction
-@st.cache_data(ttl=3600, show_spinner="Loading ward data from Google Drive...")
+@st.cache_data(ttl=3600, show_spinner="Loading ward data...")
 def load_geojson_from_drive():
-    """Load GeoJSON data from Google Drive with caching."""
+    """Load GeoJSON data with robust error handling for cloud deployment."""
     try:
         # Google Drive file ID for the ward stunting data (from secrets)
         file_id = st.secrets.get("GOOGLE_DRIVE_GEOJSON_FILE_ID")
         if not file_id:
-            st.error("Google Drive file ID not configured in secrets. Please set GOOGLE_DRIVE_GEOJSON_FILE_ID in your Streamlit secrets.")
-            return gpd.GeoDataFrame()  # Return empty GeoDataFrame instead of None
+            st.error("Google Drive file ID not configured in secrets. Please set GOOGLE_DRIVE_GEOJSON_FILE_ID in your Streamlit Cloud secrets.")
+            return gpd.GeoDataFrame()
         
         download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
         
-        response = requests.get(download_url, timeout=30)
-        response.raise_for_status()
+        # Cloud-friendly configuration with retries and timeouts
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(max_retries=3, pool_connections=10, pool_maxsize=10)
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
         
-        # Parse as GeoDataFrame
-        gdf = gpd.read_file(response.text)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
         
-        # Ensure valid geometry and CRS
-        if gdf.crs is None:
-            gdf = gdf.set_crs(epsg=4326)
-        
-        return gdf
+        try:
+            response = session.get(download_url, headers=headers, timeout=30)
+            response.raise_for_status()
+            
+            # Check if response is valid JSON/GeoJSON
+            if not response.text.strip():
+                st.error("Received empty response from Google Drive")
+                return gpd.GeoDataFrame()
+            
+            # Parse as GeoDataFrame
+            gdf = gpd.read_file(response.text)
+            
+            # Validate the GeoDataFrame
+            if gdf.empty:
+                st.warning("Loaded GeoDataFrame is empty")
+                return gdf
+            
+            # Ensure valid geometry and CRS
+            if gdf.crs is None:
+                gdf = gdf.set_crs(epsg=4326)
+            
+            # Log successful load for debugging
+            st.sidebar.success(f"✓ Loaded {len(gdf)} wards")
+            
+            return gdf
+            
+        except requests.exceptions.RequestException as e:
+            st.error(f"Network error loading data: {str(e)}")
+            st.info("If this persists, check your Google Drive file permissions and ensure the file is publicly accessible or use a direct download link.")
+            return gpd.GeoDataFrame()
+            
+        except Exception as e:
+            st.error(f"Error parsing data: {str(e)}")
+            # For debugging, show response snippet
+            try:
+                if 'response' in locals():
+                    snippet = response.text[:200] if len(response.text) > 200 else response.text
+                    st.code(f"Response snippet: {snippet}", language='text')
+            except:
+                pass
+            return gpd.GeoDataFrame()
+            
     except Exception as e:
-        st.error(f"Failed to load data: {str(e)}")
-        return gpd.GeoDataFrame()  # Return empty GeoDataFrame instead of None
+        st.error(f"Unexpected error in data loading: {str(e)}")
+        return gpd.GeoDataFrame()
 
 def create_choropleth_map(gdf, indicator, centroid_y, centroid_x):
     """Create an optimized Folium choropleth map."""
@@ -633,6 +674,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
