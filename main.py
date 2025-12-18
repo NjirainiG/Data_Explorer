@@ -17,6 +17,14 @@ import tempfile
 import time
 from datetime import datetime
 
+# Add at the beginning of main():
+def health_check():
+    return "OK"
+
+if __name__ == "__main__":
+    # Add for Streamlit Cloud health checks
+    st.write("")  # Empty write to ensure page loads
+    main()
 # Set page config for better performance
 st.set_page_config(
     page_title="Kenya 2063 Ward Level Data Explorer",
@@ -674,6 +682,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
