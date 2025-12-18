@@ -1,20 +1,23 @@
-requests
-google-generativeai
 shapely
 pyproj
 fiona
 setuptools
-streamlit
 pydeck
-geopandas
 matplotlib
 python-dotenv
-pandas
-folium
-streamlit_folium
 tabulate
 numpy
 pyarrow
+streamlit>=1.28.0
+requests>=2.31.0
+geopandas>=0.14.0
+folium>=0.14.0
+pandas>=2.0.0
+google-genai>=0.3.0
+streamlit-folium>=0.15.0
+branca>=0.6.0
+pyogrio>=0.7.0  # Add for faster GeoJSON reading
+
 
 
 
