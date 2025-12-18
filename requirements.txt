@@ -13,5 +13,8 @@ pandas
 folium
 streamlit_folium
 tabulate
+numpy
+pyarrow
+
 
 
