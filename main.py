@@ -49,7 +49,7 @@ def init_gemini():
             # Try these models in order of preference
             preferred_models = [
                 'gemini-2.0-flash-exp',
-                'gemini-2.0-flash',
+                'gemini-3-pro-preview',
                 'gemini-2.0-flash-001',
                 'gemini-2.5-flash',
                 'gemini-1.5-flash',
@@ -672,4 +672,5 @@ if __name__ == "__main__":
     except Exception as e:
         st.error(f"Application error: {str(e)}")
         st.info("Please check the logs for details.")
+
 
