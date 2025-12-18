@@ -119,74 +119,43 @@ def init_gemini():
         return None
 
 # Cache the data loading function to avoid reloading on every interaction
+# Replace load_geojson_from_drive() with optimized version:
 @st.cache_data(ttl=3600, show_spinner="Loading ward data...")
 def load_geojson_from_drive():
-    """Load GeoJSON data with robust error handling for cloud deployment."""
+    """Load GeoJSON with memory optimization for cloud deployment."""
     try:
-        # Google Drive file ID for the ward stunting data (from secrets)
         file_id = st.secrets.get("GOOGLE_DRIVE_GEOJSON_FILE_ID")
         if not file_id:
-            st.error("Google Drive file ID not configured in secrets. Please set GOOGLE_DRIVE_GEOJSON_FILE_ID in your Streamlit Cloud secrets.")
+            st.error("Google Drive file ID not configured.")
             return gpd.GeoDataFrame()
         
-        download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-        
-        # Cloud-friendly configuration with retries and timeouts
-        session = requests.Session()
-        adapter = requests.adapters.HTTPAdapter(max_retries=3, pool_connections=10, pool_maxsize=10)
-        session.mount('http://', adapter)
-        session.mount('https://', adapter)
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        
-        try:
-            response = session.get(download_url, headers=headers, timeout=30)
+        # Use st.cache_data to memoize the request
+        @st.cache_data(ttl=3600)
+        def fetch_geojson_content():
+            url = f"https://drive.google.com/uc?export=download&id={file_id}"
+            response = requests.get(url, timeout=30)
             response.raise_for_status()
-            
-            # Check if response is valid JSON/GeoJSON
-            if not response.text.strip():
-                st.error("Received empty response from Google Drive")
-                return gpd.GeoDataFrame()
-            
-            # Parse as GeoDataFrame
-            gdf = gpd.read_file(response.text)
-            
-            # Validate the GeoDataFrame
-            if gdf.empty:
-                st.warning("Loaded GeoDataFrame is empty")
-                return gdf
-            
-            # Ensure valid geometry and CRS
-            if gdf.crs is None:
-                gdf = gdf.set_crs(epsg=4326)
-            
-            # Log successful load for debugging
-            st.sidebar.success(f"✓ Loaded {len(gdf)} wards")
-            
-            return gdf
-            
-        except requests.exceptions.RequestException as e:
-            st.error(f"Network error loading data: {str(e)}")
-            st.info("If this persists, check your Google Drive file permissions and ensure the file is publicly accessible or use a direct download link.")
-            return gpd.GeoDataFrame()
-            
-        except Exception as e:
-            st.error(f"Error parsing data: {str(e)}")
-            # For debugging, show response snippet
-            try:
-                if 'response' in locals():
-                    snippet = response.text[:200] if len(response.text) > 200 else response.text
-                    st.code(f"Response snippet: {snippet}", language='text')
-            except:
-                pass
-            return gpd.GeoDataFrame()
-            
+            return response.content
+        
+        content = fetch_geojson_content()
+        
+        # Read with optimized parameters
+        gdf = gpd.read_file(
+            content,
+            driver='GeoJSON',
+            engine='pyogrio',  # Faster engine if available
+        )
+        
+        # Downcast numeric columns to save memory
+        for col in gdf.select_dtypes(include=['number']).columns:
+            gdf[col] = pd.to_numeric(gdf[col], downcast='float')
+        
+        return gdf
+        
     except Exception as e:
-        st.error(f"Unexpected error in data loading: {str(e)}")
+        st.error(f"Error loading data: {str(e)}")
         return gpd.GeoDataFrame()
-
+        
 def create_choropleth_map(gdf, indicator, centroid_y, centroid_x):
     """Create an optimized Folium choropleth map."""
     m = folium.Map(
@@ -682,6 +651,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
