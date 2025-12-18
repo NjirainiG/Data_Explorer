@@ -3,7 +3,7 @@ import requests
 import geopandas as gpd
 import folium
 import pandas as pd
-import google.generativeai as genai
+import google.genai as genai  # Updated import
 from streamlit_folium import st_folium
 from branca.element import Template, MacroElement
 import json
@@ -36,55 +36,60 @@ def init_gemini():
         api_key = st.secrets.get("GEMINI_API_KEY")
         if not api_key:
             st.warning("GEMINI_API_KEY not found in secrets. AI features will be disabled.")
-            return None
+            return None, None
         
-        # Configure with new API
+        # Initialize the client with the API key
         client = genai.Client(api_key=api_key)
         
-        # List available models and find a suitable one
-        try:
-            # Get list of available models
-            models = client.list_models()
-            
-            # Try these models in order of preference
-            preferred_models = [
-                'gemini-2.0-flash-exp',
-                'gemini-3-pro-preview',
-                'gemini-2.0-flash-001',
-                'gemini-2.5-flash',
-                'gemini-1.5-flash',
-                'gemini-1.5-pro'
-            ]
-            
-            # Filter to available models
-            available_model_names = [model.name for model in models]
-            
-            # Try each preferred model that's available
-            for model_name in preferred_models:
-                if any(model_name in name for name in available_model_names):
-                    try:
-                        # Test with a simple prompt
-                        response = client.models.generate_content(
-                            model=model_name,
-                            contents=["Hello"]
-                        )
-                        if response and response.text:
-                            st.sidebar.success(f"✓ Using model: {model_name}")
-                            return client, model_name
-                    except Exception as e:
-                        continue
-            
-            # If no preferred model works, try the first available Gemini model
-            gemini_models = [name for name in available_model_names if 'gemini' in name.lower()]
-            if gemini_models:
-                model_name = gemini_models[0].split('/')[-1]  # Remove 'models/' prefix
+        # Try the most likely models for the current API version
+        known_models = [
+            'gemini-2.0-flash-exp',
+            'gemini-2.0-flash',
+            'gemini-2.0-flash-001',
+            'gemini-2.5-flash',
+            'gemini-1.5-flash',
+            'gemini-1.5-pro',
+            'gemini-pro'
+        ]
+        
+        # Try each model
+        for model_name in known_models:
+            try:
+                # Simple test to see if the model works
                 response = client.models.generate_content(
                     model=model_name,
-                    contents=["Hello"]
+                    contents="Hello"
                 )
-                if response and response.text:
-                    st.sidebar.success(f"✓ Using available model: {model_name}")
+                if response and hasattr(response, 'text'):
+                    st.sidebar.success(f"✓ Using model: {model_name}")
                     return client, model_name
+            except Exception as e:
+                # Try the next model if this one fails
+                continue
+        
+        # If no known model works, list available models and try the first Gemini model
+        try:
+            # List models is not directly available in the new API, so we'll handle errors
+            st.warning("No known model worked. Trying to find available models...")
+            
+            # Try a few more model variations
+            fallback_models = [
+                'models/gemini-1.5-flash',
+                'models/gemini-1.5-pro',
+                'models/gemini-pro'
+            ]
+            
+            for model_name in fallback_models:
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents="Hello"
+                    )
+                    if response and hasattr(response, 'text'):
+                        st.sidebar.success(f"✓ Using fallback model: {model_name}")
+                        return client, model_name
+                except:
+                    continue
         
         except Exception as e:
             st.error(f"Error finding model: {str(e)}")
@@ -134,10 +139,14 @@ def load_geojson_from_drive():
             return gpd.GeoDataFrame()
         
         # Load GeoDataFrame with optimization
-        gdf = gpd.read_file(
-            response.text,
-            engine='pyogrio'  # Faster engine if available
-        )
+        try:
+            gdf = gpd.read_file(
+                response.text,
+                engine='pyogrio'  # Faster engine if available
+            )
+        except:
+            # Fallback to default engine
+            gdf = gpd.read_file(response.text)
         
         # Validate the GeoDataFrame
         if gdf.empty:
@@ -374,7 +383,7 @@ def query_ai_agent(question, data_summary, client, model_name, chat_history=None
         # Generate response using new API
         response = client.models.generate_content(
             model=model_name,
-            contents=[full_prompt]
+            contents=full_prompt  # Note: contents should be the prompt string
         )
         return response.text if hasattr(response, 'text') else str(response)
     except Exception as e:
@@ -672,5 +681,3 @@ if __name__ == "__main__":
     except Exception as e:
         st.error(f"Application error: {str(e)}")
         st.info("Please check the logs for details.")
-
-
