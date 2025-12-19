@@ -556,7 +556,7 @@ def main():
         return
     
     # Main interface tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["🗺️ Map Visualization", "📈 Data Analysis", "📥 Export Data", "🤖 AI Policy Advisor"])
+    tab1, tab2, tab3, tab4 = st.tabs(["🗺️ Map Visualization", "🤖 AI Policy Advisor", "📈 Data Analysis", "📥 Export Data"])
     
     with tab1:
         col1, col2 = st.columns([3, 1])
@@ -831,3 +831,4 @@ if __name__ == "__main__":
     except Exception as e:
         st.error(f"Application error: {str(e)}")
         st.info("Please check the logs for details.")
+
